@@ -1,0 +1,20 @@
+[project]
+name = "tg-export"
+version = "1.0.0"
+description = "Read-only Telegram chat history exporter"
+requires-python = ">=3.10"
+dependencies = ["telethon==1.45.0", "qrcode==8.2", "pypng==0.20220715.0", "cryptography==50.0.2"]
+
+[project.optional-dependencies]
+gui = ["flet==1.0.5", "flet-desktop==1.0.5", "httpx"]
+build = ["flet-cli==1.0.5", "pyinstaller==6.22.3", "pillow"]
+
+[project.scripts]
+tg-export = "tg_export.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["tg_export", "approval", "chat_archiver", "chat_archiver_admin"]

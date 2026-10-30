@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.egg-info/
+exports/
+*.session
+vault.bin
+build/
+dist/
+release/
+.pack/
+chat_archiver/_build_config.py
+*.spec
