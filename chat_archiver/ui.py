@@ -371,7 +371,8 @@ class ChatArchiverApp:
         async def qr_steps():
             while True:
                 url = await self.be.qr_start()
-                err.visible = False
+                if err.value != error:              # keep the reason we came here (e.g. wrong account)
+                    err.visible = False
                 area.content = ft.Row([
                     qr_image(url, 230),
                     ft.Column([T("Scan with your phone", 16, ft.FontWeight.W_600),

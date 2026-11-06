@@ -132,6 +132,7 @@ class TelethonBackend(Backend):
         return await self._call(self.client.is_user_authorized())
 
     async def qr_start(self) -> str:
+        await self.connect()                   # a logout (e.g. wrong account) drops the old client
         self._qr = await self._call(self.client.qr_login())
         return self._qr.url
 
@@ -151,6 +152,7 @@ class TelethonBackend(Backend):
         phone = re.sub(r"[\s()-]", "", phone or "")
         if not _PHONE.match(phone):
             raise UserFacingError("Enter the phone number in international format, e.g. +380501234567.")
+        await self.connect()
         await self._call(self.client.send_code_request(phone))
         self._phone = phone
 

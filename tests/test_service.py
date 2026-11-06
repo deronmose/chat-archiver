@@ -262,6 +262,46 @@ class RealBackendOfflineTests(unittest.TestCase):
         be._client = _FakeClient(me_id=42, history=[_FakeMsg(self.cfg.bot_id, old, issued - 100)])
         run(be.verify_access())
 
+    def test_login_reconnects_after_logout(self):
+        be, _, _ = self._active_backend()
+        made = []
+
+        class Conn:
+            def __init__(self):
+                self.connected = False
+                self.session = StringSession()
+
+            def is_connected(self):
+                return self.connected
+
+            async def connect(self):
+                self.connected = True
+
+            async def log_out(self):
+                self.connected = False
+                return True
+
+            async def qr_login(self):
+                class QR:
+                    url = "tg://login?token=x"
+                return QR()
+
+            async def send_code_request(self, phone):
+                return True
+
+        def factory():
+            made.append(Conn())
+            return made[-1]
+
+        be.make_client = factory
+        run(be.connect())
+        run(be.logout())                                   # e.g. the wrong account signed in
+        self.assertEqual(run(be.qr_start()), "tg://login?token=x")   # used to fail with "Not connected."
+        self.assertEqual(len(made), 2)
+        run(be.logout())
+        run(be.send_code("+380501234567"))
+        self.assertEqual(len(made), 3)
+
     def test_without_build_config_is_unavailable(self):
         be = TelethonBackend(home=self.home, config=None)
         self.assertEqual(be.access_state(), b.AccessState.NOT_CONFIGURED)

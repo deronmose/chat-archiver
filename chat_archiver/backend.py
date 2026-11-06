@@ -151,8 +151,8 @@ class Backend(abc.ABC):
 # ---------- rules shared by both backends ----------
 
 ACCESS_MESSAGES = {
-    "wrong_account": "This copy of Chat Archiver was approved for a different Telegram account. "
-                     "Log out and sign in with the approved account.",
+    "wrong_account": "Access was approved for a different Telegram account — the one that pressed Start "
+                     "in the owner's bot. Sign in with that account.",
     "expired": "Your access has ended. Please request access again.",
     "revoked": "Your access has ended. Please request access again.",
 }
