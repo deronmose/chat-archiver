@@ -345,8 +345,16 @@ class ChatArchiverApp:
         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=22, tight=True)))
 
     # ---------- login ----------
-    async def show_login(self, error: str | None = None) -> None:
+    async def show_login(self, error: str | None = None, offer_reset: bool = False) -> None:
         self._stop_bg()
+
+        async def request_again(e):
+            self._stop_bg()
+            self.be.reset_access()
+            await self.route()
+
+        reset = ft.OutlinedButton("Request access for this account", icon=ft.Icons.SEND_ROUNDED,
+                                  on_click=request_again, visible=offer_reset)
         mode = ft.SegmentedButton(segments=[ft.Segment("qr", label=T("QR code"), icon=ft.Icon(ft.Icons.QR_CODE_2)),
                                             ft.Segment("phone", label=T("Phone number"), icon=ft.Icon(ft.Icons.PHONE))],
                                   selected=["qr"])
@@ -457,7 +465,7 @@ class ChatArchiverApp:
             self.steps(1),
             card(T("Sign in to Telegram", 22, ft.FontWeight.BOLD),
                  muted("Use the Telegram account that is a member of the chats you want to archive.", 14),
-                 mode, err, area, width=640),
+                 mode, err, reset, area, width=640),
         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=22, tight=True)))
         self._spawn(qr_loop())
 
@@ -471,7 +479,7 @@ class ChatArchiverApp:
             self.account = None
             self._set_header()
             if e.reason == "wrong_account":
-                return await self.show_login(str(e))
+                return await self.show_login(str(e), offer_reset=True)
             return self.show_activation(str(e))
         except UserFacingError as e:
             return self.show_fatal(str(e), retry=True)
@@ -700,7 +708,8 @@ class ChatArchiverApp:
             self.account = None
             self._set_header()
             self.exporting = False
-            return self.show_activation(str(e)) if e.reason != "wrong_account" else await self.show_login(str(e))
+            return self.show_activation(str(e)) if e.reason != "wrong_account" \
+                else await self.show_login(str(e), offer_reset=True)
         except UserFacingError as e:
             return self._export_failed(str(e), chat, topic_id, opts, title)
         stage = T("Starting…", 15, ft.FontWeight.W_600)

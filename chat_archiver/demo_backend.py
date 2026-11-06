@@ -11,7 +11,8 @@ from pathlib import Path
 import png
 
 from approval import protocol
-from chat_archiver.backend import (AccessState, Account, ActivationError, Backend, ChatInfo, ExportOptions,
+from chat_archiver.backend import (ACCESS_MESSAGES, AccessDenied, AccessState, Account, ActivationError, Backend,
+                                   ChatInfo, ExportOptions,
                                    ExportResult, Progress, ProgressFn, Resolved, Topic, UserFacingError)
 from tg_export.exporters import export_all
 from tg_export.refs import parse_chat_ref
@@ -53,6 +54,7 @@ class DemoBackend(Backend):
         self._polls = 0
         self._requested = False
         self._phone_ok = False
+        self._wrong_account = False
         self.chats_list = [c for c, _ in _CHATS]
         self.counts = {c.id: n for c, n in _CHATS}
 
@@ -114,6 +116,9 @@ class DemoBackend(Backend):
 
     async def sign_in_code(self, code: str) -> str:
         await self._pause(0.4)
+        if self._phone_ok and code.strip() == "54321":          # demo: sign in with a different account
+            self.authorized, self._wrong_account = True, True
+            return "ok"
         if not self._phone_ok or code.strip() != "12345":
             raise UserFacingError("The code is incorrect. Check the code Telegram sent you. (Demo code: 12345)")
         return "password"
@@ -129,6 +134,9 @@ class DemoBackend(Backend):
 
     async def verify_access(self) -> None:
         await self._pause(0.3)
+        if self._wrong_account:
+            self._wrong_account, self.authorized = False, False
+            raise AccessDenied("wrong_account", ACCESS_MESSAGES["wrong_account"])
 
     # ---------- chats ----------
     async def chats(self) -> list[ChatInfo]:
@@ -237,3 +245,7 @@ class DemoBackend(Backend):
 
     async def logout(self) -> None:
         self.authorized = False
+
+    def reset_access(self) -> None:
+        self.grant = None
+        self._polls = 0

@@ -44,7 +44,7 @@ Details and residual risks: [docs/SECURITY.md](docs/SECURITY.md).
 
 ## Verification
 
-- 85 offline tests (`python -m unittest discover -s tests -t .`): protocol, guard, topics, archive/resume, exports, Admin service, end-to-end approve → activate → revoke.
+- 86 offline tests (`python -m unittest discover -s tests -t .`): protocol, guard, topics, archive/resume, exports, Admin service, end-to-end approve → activate → revoke.
 - Built executables are fully unpacked and searched for the real bot token, `api_id`, `api_hash` and owner key: 0 findings.
 - An independent review pass found and fixed: a revocation bypass, a stuck QR screen and an export race.
 - The project started as a reverse-engineering review of an existing Telethon scraper ([docs/REVERSE-REPORT.md](docs/REVERSE-REPORT.md), in Russian).

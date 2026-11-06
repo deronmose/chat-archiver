@@ -61,6 +61,9 @@ class TelethonBackend(Backend):
             self.data["session"] = self._client.session.save()
         self.vault.save(self.data)
 
+    def reset_access(self) -> None:
+        self._drop_grant()
+
     def _drop_grant(self) -> None:
         self.data.pop("grant", None)
         self._save()

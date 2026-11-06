@@ -302,6 +302,14 @@ class RealBackendOfflineTests(unittest.TestCase):
         run(be.send_code("+380501234567"))
         self.assertEqual(len(made), 3)
 
+    def test_reset_access_returns_to_request_step(self):
+        be, dev_pub, _ = self._active_backend()
+        be.reset_access()
+        self.assertEqual(be.access_state(), b.AccessState.NEEDS_ACTIVATION)
+        again = self._backend()
+        self.assertEqual(again.access_state(), b.AccessState.NEEDS_ACTIVATION)      # persisted
+        self.assertIn(p._b64e(dev_pub), again.request_url())                        # same device key
+
     def test_without_build_config_is_unavailable(self):
         be = TelethonBackend(home=self.home, config=None)
         self.assertEqual(be.access_state(), b.AccessState.NOT_CONFIGURED)

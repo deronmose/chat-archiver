@@ -109,6 +109,8 @@ class Backend(abc.ABC):
     def try_activate(self, text: str | None) -> bool: ...
     async def poll_activation(self) -> str | None:
         return None
+    @abc.abstractmethod
+    def reset_access(self) -> None: ...                         # forget the approval to request a new one
 
     # login
     @abc.abstractmethod
