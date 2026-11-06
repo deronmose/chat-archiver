@@ -57,6 +57,19 @@ class Account:
     username: str | None
 
 
+@dataclass(frozen=True)
+class AccountEntry:
+    """A Telegram account approved on this computer."""
+    user_id: int
+    name: str | None          # known after the first sign-in
+    username: str | None
+    signed_in: bool           # has a saved session
+
+    @property
+    def label(self) -> str:
+        return self.name or f"Telegram ID {self.user_id}"
+
+
 @dataclass
 class ExportOptions:
     folder: Path
@@ -109,8 +122,16 @@ class Backend(abc.ABC):
     def try_activate(self, text: str | None) -> bool: ...
     async def poll_activation(self) -> str | None:
         return None
+
+    # accounts: every Telegram account is approved separately; this computer remembers them all
     @abc.abstractmethod
-    def reset_access(self) -> None: ...                         # forget the approval to request a new one
+    def accounts(self) -> list[AccountEntry]: ...
+    @abc.abstractmethod
+    def current_account(self) -> AccountEntry | None: ...
+    @abc.abstractmethod
+    async def select_account(self, user_id: int) -> None: ...
+    @abc.abstractmethod
+    async def remove_account(self, user_id: int) -> None: ...   # forget approval and session
 
     # login
     @abc.abstractmethod
@@ -145,7 +166,7 @@ class Backend(abc.ABC):
     async def export(self, chat_id: int, topic_id: int | None, options: ExportOptions,
                      on_progress: ProgressFn) -> ExportResult: ...
     @abc.abstractmethod
-    async def logout(self) -> None: ...
+    async def logout(self) -> None: ...                         # signs the current account out, keeps its approval
     async def close(self) -> None:
         return None
 
@@ -153,8 +174,8 @@ class Backend(abc.ABC):
 # ---------- rules shared by both backends ----------
 
 ACCESS_MESSAGES = {
-    "wrong_account": "Access was approved for a different Telegram account — the one that pressed Start "
-                     "in the owner's bot. Sign in with that account.",
+    "wrong_account": "This Telegram account isn't approved on this computer yet. Sign in with an approved "
+                     "account, or request access for this one.",
     "expired": "Your access has ended. Please request access again.",
     "revoked": "Your access has ended. Please request access again.",
 }

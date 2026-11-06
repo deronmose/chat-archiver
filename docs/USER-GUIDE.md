@@ -44,6 +44,18 @@ along with media download, the file size limit, a start date and the file format
 **Stopped or lost connection?** Just run it again — it continues where it stopped
 and only downloads what's new.
 
+## Several Telegram accounts
+
+Each Telegram account is approved separately, and Chat Archiver remembers every approved account on this computer.
+
+- **Log out** signs the current account out but keeps its approval. You'll see **Choose an account**:
+  pick an account to sign in again, remove one with the bin icon, or click **Add another account**.
+- **Add another account** → **Request access** → press **Start** in the bot *from the account you want to add* →
+  the owner approves → sign in with that account.
+- **⋮ → Switch account** jumps between approved accounts without signing out.
+- If you sign in with an account that isn't approved yet, Chat Archiver says so and offers
+  **Request access for this account** — your other accounts are not affected.
+
 ## Good to know
 
 - Archives contain other people's messages. Keep them private and don't use them to train AI models.

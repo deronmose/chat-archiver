@@ -161,6 +161,8 @@ class ChatArchiverApp:
                 ft.Icon(ft.Icons.PERSON_OUTLINE, size=18, color=ft.Colors.ON_SURFACE_VARIANT),
                 muted(self.account.name + (f"  @{self.account.username}" if self.account.username else "")),
                 ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, items=[
+                    ft.PopupMenuItem(content=T("Switch account"), icon=ft.Icons.SWITCH_ACCOUNT,
+                                     on_click=lambda e: self.switch_account()),
                     ft.PopupMenuItem(content=T("About"), icon=ft.Icons.INFO_OUTLINE, on_click=lambda e: self.show_about()),
                     ft.PopupMenuItem(content=T("Log out"), icon=ft.Icons.LOGOUT, on_click=lambda e: self.confirm_logout()),
                 ]),
@@ -192,14 +194,75 @@ class ChatArchiverApp:
             return self.show_welcome()
         if state is AccessState.NEEDS_ACTIVATION:
             return self.show_activation()
+        cur = self.be.current_account()
+        if cur and cur.signed_in:                       # resume the account used last time
+            return await self.open_account(cur.user_id)
+        self.show_accounts()
+
+    async def open_account(self, user_id: int) -> None:
+        self._stop_bg()
         self.show_loading("Connecting…")
         try:
+            await self.be.select_account(user_id)
             await self.be.connect()
             if await self.be.is_authorized():
                 return await self.after_login()
         except UserFacingError as e:
             return self.show_fatal(str(e), retry=True)
         await self.show_login()
+
+    # ---------- accounts ----------
+    def show_accounts(self, notice: str | None = None) -> None:
+        self._stop_bg()
+        self.account = None
+        self._set_header()
+        accounts = self.be.accounts()
+        if not accounts:
+            return self.show_activation(notice)
+        rows = []
+        for a in accounts:
+            async def pick(e, uid=a.user_id):
+                await self.open_account(uid)
+
+            initials = "".join(w[0] for w in a.label.split()[:2]).upper() if a.name else "#"
+            status = ("@" + a.username + "  ·  " if a.username else "") + ("Signed in" if a.signed_in else "Signed out")
+            rows.append(ft.Container(
+                ft.Row([
+                    ft.Container(T(initials, 14, ft.FontWeight.BOLD, ft.Colors.WHITE), width=40, height=40,
+                                 border_radius=20, bgcolor=ACCENT, alignment=ft.Alignment.CENTER),
+                    ft.Column([T(a.label, 15, ft.FontWeight.W_600), muted(status, 12)], spacing=2, expand=True),
+                    ft.IconButton(ft.Icons.DELETE_OUTLINE, tooltip="Remove from this computer",
+                                  on_click=lambda e, a=a: self.confirm_remove(a)),
+                    ft.Icon(ft.Icons.CHEVRON_RIGHT, color=ft.Colors.ON_SURFACE_VARIANT),
+                ], spacing=14),
+                padding=ft.Padding.symmetric(horizontal=14, vertical=10), border_radius=12, ink=True,
+                border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT), on_click=pick))
+        self.show(centered(card(
+            T("Choose an account", 22, ft.FontWeight.BOLD),
+            muted("Telegram accounts approved on this computer. Each account needs the owner's approval.", 14),
+            *([note(notice, "warn")] if notice else []),
+            *rows,
+            ft.Row([ft.OutlinedButton("Add another account", icon=ft.Icons.ADD,
+                                      on_click=lambda e: self.show_activation())]),
+            width=560)))
+
+    def confirm_remove(self, a) -> None:
+        async def do(e):
+            self.page.pop_dialog()
+            self.show_loading("Removing…")
+            await self.be.remove_account(a.user_id)
+            self.show_accounts()
+
+        self.page.show_dialog(ft.AlertDialog(
+            modal=True, title=T(f"Remove {a.label}?", 18, ft.FontWeight.BOLD),
+            content=ft.Container(muted("This account will be signed out and forgotten on this computer. To use it "
+                                       "again, it will need the owner's approval.", 14), width=420),
+            actions=[ft.TextButton("Cancel", on_click=lambda e: self.page.pop_dialog()),
+                     ft.FilledButton("Remove", on_click=do)]))
+
+    def switch_account(self) -> None:
+        if not self.busy():
+            self.show_accounts()
 
     def show_loading(self, text: str) -> None:
         self.show(centered(ft.Column([ft.ProgressRing(width=36, height=36), muted(text, 14)],
@@ -281,7 +344,8 @@ class ChatArchiverApp:
         async def done():
             self._stop_bg()
             self.toast("Access granted")
-            await self.route()
+            cur = self.be.current_account()             # the account this approval is for
+            await (self.open_account(cur.user_id) if cur else self.route())
 
         async def on_manual(e):
             if activate(code_field.value, manual=True):
@@ -325,13 +389,18 @@ class ChatArchiverApp:
                 self._spawn(watch())
 
         request_btn = ft.FilledButton("Request access", icon=ft.Icons.SEND_ROUNDED, on_click=on_request)
+        adding = bool(self.be.accounts())                 # other accounts are already approved here
+        back = [ft.TextButton("Back to accounts", icon=ft.Icons.ARROW_BACK,
+                              on_click=lambda e: self.show_accounts())] if adding else []
         self.show(centered(ft.Column([
             self.steps(0),
             card(
-                T("Request access", 22, ft.FontWeight.BOLD),
-                muted("Chat Archiver works only with the owner's approval. The button opens the owner's bot in your "
-                      "Telegram app — press Start there. Your Telegram name and this computer's name will be sent "
-                      "to the owner.", 14),
+                T("Add another account" if adding else "Request access", 22, ft.FontWeight.BOLD),
+                muted(("Press Start in the owner's bot from the Telegram account you want to add — each account is "
+                       "approved separately. " if adding else
+                       "Chat Archiver works only with the owner's approval. The button opens the owner's bot in your "
+                       "Telegram app — press Start there. ") +
+                      "Your Telegram name and this computer's name will be sent to the owner.", 14),
                 ft.Row([
                     ft.Column([request_btn, status], spacing=14, expand=True),
                     ft.Column([qr_image(url, 200),
@@ -341,20 +410,26 @@ class ChatArchiverApp:
                 ft.Divider(),
                 ft.Row([code_field, ft.OutlinedButton("Activate", on_click=on_manual)]),
                 err,
+                *back,
                 width=640),
         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=22, tight=True)))
 
     # ---------- login ----------
     async def show_login(self, error: str | None = None, offer_reset: bool = False) -> None:
+        """offer_reset: the signed-in account isn't approved here — offer to request access for it."""
         self._stop_bg()
 
-        async def request_again(e):
-            self._stop_bg()
-            self.be.reset_access()
-            await self.route()
-
-        reset = ft.OutlinedButton("Request access for this account", icon=ft.Icons.SEND_ROUNDED,
-                                  on_click=request_again, visible=offer_reset)
+        approved = self.be.accounts()
+        cur = self.be.current_account()
+        reset = ft.Row([
+            ft.OutlinedButton("Request access for this account", icon=ft.Icons.SEND_ROUNDED,
+                              on_click=lambda e: self.show_activation()),
+            ft.TextButton("Choose another account", on_click=lambda e: self.show_accounts()),
+        ], wrap=True, visible=offer_reset)
+        hint = muted(f"Sign in as {cur.label}" + (f" (@{cur.username})" if cur.username else "") + ".", 14) \
+            if cur and cur.name and not offer_reset else None
+        others = ft.TextButton("Choose another account", on_click=lambda e: self.show_accounts()) \
+            if len(approved) > 1 and not offer_reset else None
         mode = ft.SegmentedButton(segments=[ft.Segment("qr", label=T("QR code"), icon=ft.Icon(ft.Icons.QR_CODE_2)),
                                             ft.Segment("phone", label=T("Phone number"), icon=ft.Icon(ft.Icons.PHONE))],
                                   selected=["qr"])
@@ -464,8 +539,8 @@ class ChatArchiverApp:
         self.show(centered(ft.Column([
             self.steps(1),
             card(T("Sign in to Telegram", 22, ft.FontWeight.BOLD),
-                 muted("Use the Telegram account that is a member of the chats you want to archive.", 14),
-                 mode, err, reset, area, width=640),
+                 hint or muted("Use the Telegram account that is a member of the chats you want to archive.", 14),
+                 mode, err, reset, area, *([others] if others else []), width=640),
         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=22, tight=True)))
         self._spawn(qr_loop())
 
@@ -480,7 +555,7 @@ class ChatArchiverApp:
             self._set_header()
             if e.reason == "wrong_account":
                 return await self.show_login(str(e), offer_reset=True)
-            return self.show_activation(str(e))
+            return self.show_accounts(str(e))        # expired/revoked: only that account was removed
         except UserFacingError as e:
             return self.show_fatal(str(e), retry=True)
         self._set_header()
@@ -708,7 +783,7 @@ class ChatArchiverApp:
             self.account = None
             self._set_header()
             self.exporting = False
-            return self.show_activation(str(e)) if e.reason != "wrong_account" \
+            return self.show_accounts(str(e)) if e.reason != "wrong_account" \
                 else await self.show_login(str(e), offer_reset=True)
         except UserFacingError as e:
             return self._export_failed(str(e), chat, topic_id, opts, title)
@@ -829,13 +904,11 @@ class ChatArchiverApp:
             self.page.pop_dialog()
             self.show_loading("Logging out…")
             await self.be.logout()
-            self.account = None
-            self._set_header()
-            await self.route()
+            self.show_accounts()
 
         self.page.show_dialog(ft.AlertDialog(
             modal=True, title=T("Log out?", 18, ft.FontWeight.BOLD),
-            content=muted("Chat Archiver will sign out of Telegram on this computer. Archives already saved stay on "
-                          "your disk.", 14),
+            content=muted("This account will be signed out of Telegram on this computer, but stays approved — you "
+                          "can sign in again or add another account. Archives already saved stay on your disk.", 14),
             actions=[ft.TextButton("Cancel", on_click=lambda e: self.page.pop_dialog()),
                      ft.FilledButton("Log out", on_click=do)]))

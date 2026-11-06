@@ -14,7 +14,8 @@ from telethon.tl import functions
 
 from approval import protocol
 from chat_archiver import __version__
-from chat_archiver.backend import (ACCESS_MESSAGES, AccessDenied, AccessState, Account, ActivationError, Backend,
+from chat_archiver.backend import (ACCESS_MESSAGES, AccessDenied, AccessState, Account, AccountEntry,
+                                   ActivationError, Backend,
                                    ChatInfo, ExportOptions, ExportResult, Progress, ProgressFn, Resolved, Topic,
                                    UserFacingError, evaluate_access, friendly_error)
 from chat_archiver.config import BuildConfig
@@ -47,37 +48,95 @@ class TelethonBackend(Backend):
             self.vault.save(self.data)
         self.device = protocol.device_key_from_private(bytes.fromhex(self.data["device_key"]))
         self._client: ReadOnlyClient | None = None
+        self._verified: str | None = None      # account the live client is confirmed to belong to
         self._qr = None
         self._phone: str | None = None
         self._entities: dict[int, object] = {}
+        self._migrate()
 
-    # ---------- activation ----------
-    def _grant(self) -> protocol.Grant | None:
-        g = self.data.get("grant")
-        return protocol.Grant(**g) if g else None
+    # ---------- accounts ----------
+    # data["accounts"] = {user_id: {"grant": {...}, "session": str|None, "name": ..., "username": ...}}
+    def _accounts(self) -> dict[str, dict]:
+        return self.data.setdefault("accounts", {})
+
+    def _migrate(self) -> None:
+        """Version 1.0 kept a single approval and session."""
+        grant, session = self.data.pop("grant", None), self.data.pop("session", None)
+        if grant:
+            uid = str(grant["user_id"])
+            self._accounts().setdefault(uid, {"grant": grant, "session": session})
+            self.data.setdefault("current", uid)
+            self.vault.save(self.data)
+
+    def _grant(self, uid: str | None = None) -> protocol.Grant | None:
+        acc = self._accounts().get(uid or self.data.get("current") or "")
+        return protocol.Grant(**acc["grant"]) if acc and acc.get("grant") else None
+
+    def _prune(self) -> None:
+        """Forget approvals that expired by this computer's clock (server time is checked on sign-in)."""
+        now, accounts = time.time(), self._accounts()
+        expired = [uid for uid, acc in accounts.items() if protocol.is_expired(protocol.Grant(**acc["grant"]), now)]
+        for uid in expired:
+            del accounts[uid]
+        if self.data.get("current") not in accounts:
+            self.data["current"] = None
+        if expired:
+            self.vault.save(self.data)
 
     def _save(self) -> None:
-        if self._client is not None:
-            self.data["session"] = self._client.session.save()
+        if self._client is not None and self._verified in self._accounts():
+            self._accounts()[self._verified]["session"] = self._client.session.save()
         self.vault.save(self.data)
 
-    def reset_access(self) -> None:
-        self._drop_grant()
+    async def _drop_client(self, log_out: bool = False) -> None:
+        if self._client is not None:
+            try:
+                await (self._client.log_out() if log_out else self._client.disconnect())
+            except Exception:
+                pass
+        self._client, self._verified, self._qr = None, None, None
 
-    def _drop_grant(self) -> None:
-        self.data.pop("grant", None)
-        self._save()
+    def accounts(self) -> list[AccountEntry]:
+        self._prune()
+        return [AccountEntry(int(uid), acc.get("name"), acc.get("username"), bool(acc.get("session")))
+                for uid, acc in self._accounts().items()]
 
+    def current_account(self) -> AccountEntry | None:
+        cur = self.data.get("current")
+        return next((a for a in self.accounts() if str(a.user_id) == cur), None)
+
+    async def select_account(self, user_id: int) -> None:
+        if str(user_id) not in self._accounts():
+            raise UserFacingError("This account is not approved on this computer.")
+        if self.data.get("current") != str(user_id) or self._verified != str(user_id):
+            await self._drop_client()
+        self.data["current"] = str(user_id)
+        self.vault.save(self.data)
+
+    async def remove_account(self, user_id: int) -> None:
+        uid = str(user_id)
+        acc = self._accounts().get(uid)
+        if acc is None:
+            return
+        if self.data.get("current") == uid:
+            await self._drop_client(log_out=bool(acc.get("session")))   # end that Telegram session too
+        elif acc.get("session"):
+            try:                                                        # best effort for a stored session
+                tmp = self._new_client(protocol.Grant(**acc["grant"]), acc["session"])
+                await asyncio.wait_for(tmp.connect(), 15)
+                await asyncio.wait_for(tmp.log_out(), 15)
+            except Exception:
+                pass
+        self._accounts().pop(uid, None)
+        if self.data.get("current") == uid:
+            self.data["current"] = None
+        self.vault.save(self.data)
+
+    # ---------- activation ----------
     def access_state(self) -> AccessState:
         if self.config is None:
             return AccessState.NOT_CONFIGURED
-        grant = self._grant()
-        if grant is None:
-            return AccessState.NEEDS_ACTIVATION
-        if protocol.is_expired(grant, time.time()):
-            self._drop_grant()
-            return AccessState.NEEDS_ACTIVATION
-        return AccessState.ACTIVE
+        return AccessState.ACTIVE if self.accounts() else AccessState.NEEDS_ACTIVATION
 
     def request_url(self) -> str:
         payload = protocol.make_start_payload(self.device.public, protocol.device_label(platform.node()))
@@ -93,17 +152,27 @@ class TelethonBackend(Backend):
             raise ActivationError(str(e)) from e
         if protocol.is_expired(grant, time.time()):
             raise ActivationError("This activation code has already expired. Please request access again.")
-        self.data["grant"] = grant.__dict__.copy()
-        self._save()
+        uid = str(grant.user_id)
+        entry = self._accounts().setdefault(uid, {})
+        entry["grant"] = grant.__dict__.copy()                  # a renewed approval keeps the session
+        self.data["current"] = uid
+        self.vault.save(self.data)
         return True
 
     # ---------- login ----------
     def make_client(self) -> ReadOnlyClient:
-        grant = self._grant()
-        if grant is None or self.config is None:
+        """Client for the current account; with no current account any approval supplies the API keys."""
+        if self.config is None:
             raise ActivationError("This computer is not activated yet.")
+        cur = self.data.get("current")
+        grant = self._grant(cur) or next((protocol.Grant(**a["grant"]) for a in self._accounts().values()), None)
+        if grant is None:
+            raise ActivationError("This computer is not activated yet.")
+        return self._new_client(grant, (self._accounts().get(cur or "") or {}).get("session"))
+
+    def _new_client(self, grant: protocol.Grant, session: str | None) -> ReadOnlyClient:
         return ReadOnlyClient(
-            StringSession(self.data.get("session") or ""), grant.api_id, grant.api_hash,
+            StringSession(session or ""), grant.api_id, grant.api_hash,
             receive_updates=True,              # QR login is confirmed through an update
             flood_sleep_threshold=3600,
             device_model="Chat Archiver", system_version=platform.system(), app_version=__version__,
@@ -177,10 +246,15 @@ class TelethonBackend(Backend):
         return Account(me.id, name, me.username)
 
     async def verify_access(self) -> None:
-        grant = self._grant()
-        if grant is None:
-            raise AccessDenied("expired", ACCESS_MESSAGES["expired"])
+        """Run after every sign-in and before every archive. The signed-in Telegram account must be
+        one of the accounts approved on this computer; other approved accounts are never touched."""
         me = await self._call(self.client.get_me())
+        uid = str(me.id)
+        grant = self._grant(uid)
+        if grant is None:
+            await self._drop_client(log_out=True)              # don't keep an unapproved session around
+            raise AccessDenied("wrong_account", ACCESS_MESSAGES["wrong_account"])
+        self.data["current"], self._verified = uid, uid
         config = await self._call(self.client(functions.help.GetConfigRequest()))
         server_now = config.date.timestamp()
         # Revoke notices: every message *from the bot* since this grant was issued, however many
@@ -201,12 +275,12 @@ class TelethonBackend(Backend):
                                   "Check your internet connection and try again.") from e
         reason = evaluate_access(grant, me.id, server_now, texts, self.device.public, self.config.owner_verify_key)
         if reason is None:
+            entry = self._accounts()[uid]
+            entry["name"] = " ".join(p for p in (me.first_name, me.last_name) if p) or me.username or uid
+            entry["username"] = me.username
             self._save()
             return
-        if reason == "wrong_account":
-            await self.logout()
-        else:
-            self._drop_grant()
+        await self.remove_account(me.id)                       # expired or revoked: only this account
         raise AccessDenied(reason, ACCESS_MESSAGES[reason])
 
     # ---------- chats ----------
@@ -308,13 +382,16 @@ class TelethonBackend(Backend):
         return ExportResult(folder, html if html.exists() else None, count, ok, failed)
 
     async def logout(self) -> None:
-        if self._client is not None:
+        """Sign the current account out of Telegram; its approval stays, so it can sign in again."""
+        cur = self.data.get("current")
+        if cur in self._accounts() and self._client is None and self._accounts()[cur].get("session"):
             try:
-                await self._client.log_out()
+                await self.connect()
             except Exception:
                 pass
-            self._client = None
-        self.data.pop("session", None)
+        await self._drop_client(log_out=True)
+        if cur in self._accounts():
+            self._accounts()[cur]["session"] = None
         self.vault.save(self.data)
 
     async def close(self) -> None:

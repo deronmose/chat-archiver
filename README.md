@@ -18,7 +18,8 @@ It is shared only with people the owner approves personally, and the executable 
 - **Groups, channels and topics:** archive a whole forum group or one topic; a link to a message inside a topic selects that topic.
 - **Resumable:** stop at any time; the next run continues from the last saved message and only fetches what's new.
 - **Output:** `chat.html` (escaped, script-free with CSP), `messages.csv` (Excel-safe), `messages.json`, `media/`.
-- **Owner approval:** every person is approved in **Chat Archiver Admin** (Approve / Deny / Revoke, history). Access lasts 14 days per device.
+- **Owner approval:** every Telegram account is approved in **Chat Archiver Admin** (Approve / Deny / Revoke, history). Access lasts 14 days per device.
+- **Several accounts:** one computer can hold several approved Telegram accounts — switch between them, add or remove accounts.
 
 ## How access works (no server, no keys in the exe)
 
@@ -44,7 +45,7 @@ Details and residual risks: [docs/SECURITY.md](docs/SECURITY.md).
 
 ## Verification
 
-- 86 offline tests (`python -m unittest discover -s tests -t .`): protocol, guard, topics, archive/resume, exports, Admin service, end-to-end approve → activate → revoke.
+- 89 offline tests (`python -m unittest discover -s tests -t .`): protocol, guard, topics, archive/resume, exports, Admin service, end-to-end approve → activate → revoke.
 - Built executables are fully unpacked and searched for the real bot token, `api_id`, `api_hash` and owner key: 0 findings.
 - An independent review pass found and fixed: a revocation bypass, a stuck QR screen and an export race.
 - The project started as a reverse-engineering review of an existing Telethon scraper ([docs/REVERSE-REPORT.md](docs/REVERSE-REPORT.md), in Russian).

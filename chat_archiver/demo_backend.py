@@ -11,7 +11,8 @@ from pathlib import Path
 import png
 
 from approval import protocol
-from chat_archiver.backend import (ACCESS_MESSAGES, AccessDenied, AccessState, Account, ActivationError, Backend,
+from chat_archiver.backend import (ACCESS_MESSAGES, AccessDenied, AccessState, Account, AccountEntry,
+                                   ActivationError, Backend,
                                    ChatInfo, ExportOptions,
                                    ExportResult, Progress, ProgressFn, Resolved, Topic, UserFacingError)
 from tg_export.exporters import export_all
@@ -20,6 +21,8 @@ from tg_export.scraper import GENERAL_TOPIC, chat_folder_name, sanitize_filename
 from tg_export.store import Archive
 
 DEMO_USER = Account(1000, "Alex Demo", "alex_demo")
+SECOND_USER = Account(2002, "Sam Second", "sam_second")          # demo: phone code 54321 signs in as Sam
+DEMO_USERS = {a.id: a for a in (DEMO_USER, SECOND_USER)}
 _FORUM_TOPICS = {GENERAL_TOPIC: "General", 3: "Announcements", 5: "Design", 8: "Bugs & feedback"}
 _CHATS = [
     (ChatInfo(-1001000000003, "Product Team", "group", "product_team", forum=True), 240),
@@ -49,23 +52,48 @@ class DemoBackend(Backend):
         self.fast = fast
         self.owner = protocol.new_owner_key()
         self.device = protocol.new_device_key()
-        self.grant: protocol.Grant | None = None
-        self.authorized = False
+        self.approved: dict[int, dict] = {}      # user_id -> {"grant", "signed_in", "seen"}
+        self.current: int | None = None
+        self.logged: int | None = None          # account signed in on the fake client
+        self._pending: int | None = None        # account a password step will sign in
         self._polls = 0
         self._requested = False
         self._phone_ok = False
-        self._wrong_account = False
         self.chats_list = [c for c, _ in _CHATS]
         self.counts = {c.id: n for c, n in _CHATS}
 
     async def _pause(self, seconds: float) -> None:
         await asyncio.sleep(0 if self.fast else seconds)
 
+    @property
+    def authorized(self) -> bool:
+        return self.logged is not None
+
+    # ---------- accounts ----------
+    def accounts(self) -> list[AccountEntry]:
+        out = []
+        for uid, a in self.approved.items():
+            user = DEMO_USERS[uid] if a["seen"] else None
+            out.append(AccountEntry(uid, user.name if user else None, user.username if user else None, a["signed_in"]))
+        return out
+
+    def current_account(self) -> AccountEntry | None:
+        return next((a for a in self.accounts() if a.user_id == self.current), None)
+
+    async def select_account(self, user_id: int) -> None:
+        if user_id not in self.approved:
+            raise UserFacingError("This account is not approved on this computer.")
+        self.current = user_id
+        self.logged = user_id if self.approved[user_id]["signed_in"] else None
+
+    async def remove_account(self, user_id: int) -> None:
+        self.approved.pop(user_id, None)
+        if self.current == user_id:
+            self.current = self.logged = None
+
     # ---------- activation ----------
     def access_state(self) -> AccessState:
-        if self.grant and not protocol.is_expired(self.grant, time.time()):
-            return AccessState.ACTIVE
-        return AccessState.NEEDS_ACTIVATION
+        return AccessState.ACTIVE if self.approved else AccessState.NEEDS_ACTIVATION
 
     def request_url(self) -> str:
         self._requested = True
@@ -78,18 +106,25 @@ class DemoBackend(Backend):
         self._polls += 1
         if self._polls < (1 if self.fast else 4):
             return None
+        self._polls, self._requested = 0, False
+        uid = next((u for u in DEMO_USERS if u not in self.approved), DEMO_USER.id)   # next account to approve
         now = int(time.time())
         return protocol.issue_code(self.owner, self.device.public, protocol.Grant(
-            1234567, "0123456789abcdef0123456789abcdef", DEMO_USER.id, now, now + protocol.VALIDITY_DAYS * 86400))
+            1234567, "0123456789abcdef0123456789abcdef", uid, now, now + protocol.VALIDITY_DAYS * 86400))
 
     def try_activate(self, text: str | None) -> bool:
         code = protocol.find_code(text)
         if code is None:
             return False
         try:
-            self.grant = protocol.open_code(code, self.device, self.owner.verify_key)
+            grant = protocol.open_code(code, self.device, self.owner.verify_key)
         except protocol.InvalidCode as e:
             raise ActivationError(str(e)) from e
+        prev = self.approved.get(grant.user_id, {})
+        self.approved[grant.user_id] = {"grant": grant, "signed_in": prev.get("signed_in", False),
+                                        "seen": prev.get("seen", False)}
+        self.current = grant.user_id
+        self.logged = None
         return True
 
     # ---------- login ----------
@@ -104,7 +139,7 @@ class DemoBackend(Backend):
 
     async def qr_wait(self, timeout: float) -> str:
         await self._pause(min(timeout, 4))
-        self.authorized = True
+        self.logged = self.current or DEMO_USER.id             # the phone that scans is the current account
         return "ok"
 
     async def send_code(self, phone: str) -> None:
@@ -116,27 +151,31 @@ class DemoBackend(Backend):
 
     async def sign_in_code(self, code: str) -> str:
         await self._pause(0.4)
-        if self._phone_ok and code.strip() == "54321":          # demo: sign in with a different account
-            self.authorized, self._wrong_account = True, True
+        if self._phone_ok and code.strip() == "54321":          # demo: the second account
+            self.logged = SECOND_USER.id
             return "ok"
         if not self._phone_ok or code.strip() != "12345":
             raise UserFacingError("The code is incorrect. Check the code Telegram sent you. (Demo code: 12345)")
+        self._pending = self.current or DEMO_USER.id
         return "password"
 
     async def sign_in_password(self, password: str) -> None:
         await self._pause(0.4)
         if password != "demo":
             raise UserFacingError("Wrong password. Enter your Telegram two-step verification password. (Demo: demo)")
-        self.authorized = True
+        self.logged = self._pending or DEMO_USER.id
 
     async def account(self) -> Account:
-        return DEMO_USER
+        return DEMO_USERS[self.logged or DEMO_USER.id]
 
     async def verify_access(self) -> None:
         await self._pause(0.3)
-        if self._wrong_account:
-            self._wrong_account, self.authorized = False, False
+        uid = self.logged
+        if uid not in self.approved:
+            self.logged = None
             raise AccessDenied("wrong_account", ACCESS_MESSAGES["wrong_account"])
+        self.current = uid
+        self.approved[uid].update(signed_in=True, seen=True)
 
     # ---------- chats ----------
     async def chats(self) -> list[ChatInfo]:
@@ -244,8 +283,6 @@ class DemoBackend(Backend):
         return ExportResult(folder, folder / "chat.html", count, ok, 0)
 
     async def logout(self) -> None:
-        self.authorized = False
-
-    def reset_access(self) -> None:
-        self.grant = None
-        self._polls = 0
+        if self.current in self.approved:
+            self.approved[self.current]["signed_in"] = False
+        self.logged = None

@@ -29,11 +29,26 @@ class _FakeMsg:
         self.date = datetime.fromtimestamp(ts, timezone.utc)
 
 
+class _Sess:
+    def __init__(self, value):
+        self.value = value
+
+    def save(self):
+        return self.value
+
+
 class _FakeClient:
     """Just enough of TelegramClient for verify_access()."""
-    def __init__(self, me_id, history, fail_history=False):
-        self.me_id, self.history, self.fail_history = me_id, history, fail_history
-        self.session = StringSession()
+    def __init__(self, me_id, history=(), fail_history=False):
+        self.me_id, self.history, self.fail_history = me_id, list(history), fail_history
+        self.session = _Sess(f"session-of-{me_id}")
+        self.logged_out = False
+
+    def is_connected(self):
+        return True
+
+    async def disconnect(self):
+        return None
 
     async def get_me(self):
         return types.User(id=self.me_id, first_name="X")
@@ -53,6 +68,7 @@ class _FakeClient:
             yield m
 
     async def log_out(self):
+        self.logged_out = True
         return True
 
 
@@ -146,6 +162,32 @@ class DemoFlowTests(unittest.TestCase):
                 await task
             result = await be.export(big.id, None, opts, lambda _: None)
             self.assertEqual(result.messages, be.demo_message_count(big.id))
+        run(flow())
+
+    def test_demo_second_account(self):
+        async def flow():
+            be = DemoBackend(home=self.dir / "home", fast=True)
+            await self._activate(be)
+            await be.connect()
+            await be.qr_start()
+            await be.qr_wait(5)
+            await be.verify_access()
+            await be.logout()
+            self.assertEqual([(a.user_id, a.signed_in) for a in be.accounts()], [(1000, False)])
+            await be.send_code("+15550001111")
+            self.assertEqual(await be.sign_in_code("54321"), "ok")            # Sam, not approved yet
+            with self.assertRaises(b.AccessDenied):
+                await be.verify_access()
+            be.request_url()
+            code = None
+            while not code:
+                code = await be.poll_activation()
+            self.assertTrue(be.try_activate(code))                            # owner approves Sam
+            await be.send_code("+15550001111")
+            await be.sign_in_code("54321")
+            await be.verify_access()
+            self.assertEqual(sorted((a.user_id, a.signed_in) for a in be.accounts()), [(1000, False), (2002, True)])
+            self.assertEqual((await be.account()).name, "Sam Second")
         run(flow())
 
     def test_phone_login_and_errors(self):
@@ -302,13 +344,64 @@ class RealBackendOfflineTests(unittest.TestCase):
         run(be.send_code("+380501234567"))
         self.assertEqual(len(made), 3)
 
-    def test_reset_access_returns_to_request_step(self):
-        be, dev_pub, _ = self._active_backend()
-        be.reset_access()
-        self.assertEqual(be.access_state(), b.AccessState.NEEDS_ACTIVATION)
-        again = self._backend()
-        self.assertEqual(again.access_state(), b.AccessState.NEEDS_ACTIVATION)      # persisted
-        self.assertIn(p._b64e(dev_pub), again.request_url())                        # same device key
+    def _code(self, dev_pub, uid):
+        now = int(time.time()) - 60
+        return p.issue_code(self.owner, dev_pub, p.Grant(1, API_HASH, uid, now, now + 14 * 86400))
+
+    def test_several_accounts_on_one_computer(self):
+        be, dev_pub, _ = self._active_backend(user_id=42)
+        be._client = _FakeClient(42)
+        run(be.verify_access())
+        self.assertEqual([(a.user_id, a.signed_in) for a in be.accounts()], [(42, True)])
+        self.assertEqual(be.current_account().name, "X")
+
+        run(be.logout())                                         # sign out: approval is kept
+        self.assertEqual([(a.user_id, a.signed_in) for a in be.accounts()], [(42, False)])
+        self.assertEqual(be.access_state(), b.AccessState.ACTIVE)
+
+        self.assertTrue(be.try_activate(self._code(dev_pub, 77)))   # add a second account
+        self.assertEqual(sorted(a.user_id for a in be.accounts()), [42, 77])
+        self.assertEqual(be.current_account().user_id, 77)
+
+        stranger = _FakeClient(99)                               # an account nobody approved
+        be._client = stranger
+        with self.assertRaises(b.AccessDenied) as ctx:
+            run(be.verify_access())
+        self.assertEqual(ctx.exception.reason, "wrong_account")
+        self.assertTrue(stranger.logged_out)                     # its session is not kept
+        self.assertEqual(sorted(a.user_id for a in be.accounts()), [42, 77])
+
+        be._client = _FakeClient(42)                             # any approved account may sign in
+        run(be.verify_access())
+        self.assertEqual(be.current_account().user_id, 42)
+
+        run(be.select_account(77))
+        self.assertIsNone(be._client)
+        self.assertEqual(be.current_account().user_id, 77)
+        run(be.remove_account(77))
+        self.assertEqual([a.user_id for a in self._backend().accounts()], [42])   # persisted
+
+    def test_revoke_affects_only_that_account(self):
+        be, dev_pub, issued = self._active_backend(user_id=42)
+        be.try_activate(self._code(dev_pub, 77))
+        be._client = _FakeClient(42, [_FakeMsg(self.cfg.bot_id, p.issue_revoke(self.owner, dev_pub, issued + 9),
+                                               issued + 9)])
+        with self.assertRaises(b.AccessDenied):
+            run(be.verify_access())
+        self.assertEqual([a.user_id for a in be.accounts()], [77])
+
+    def test_migrates_single_account_vault(self):
+        dev = p.new_device_key()
+        now = int(time.time())
+        old = {"device_key": dev.private.hex(), "session": "old-session",
+               "grant": p.Grant(1, API_HASH, 42, now, now + 86400).__dict__}
+        Vault(self.home / "vault.bin").save(old)
+        be = self._backend()
+        self.assertEqual([(a.user_id, a.signed_in) for a in be.accounts()], [(42, True)])
+        self.assertEqual(be.current_account().user_id, 42)
+        data = Vault(self.home / "vault.bin").load()
+        self.assertNotIn("grant", data)
+        self.assertEqual(data["accounts"]["42"]["session"], "old-session")
 
     def test_without_build_config_is_unavailable(self):
         be = TelethonBackend(home=self.home, config=None)
